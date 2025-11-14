@@ -49,6 +49,7 @@ n_heads = cfg.n_heads
 n_layers = cfg.n_layers
 d_ff = cfg.d_ff
 dropout = cfg.dropout
+warmup = cfg.warmup
 
 learning_rate = cfg.learning_rate
 weight_decay = cfg.weight_decay
@@ -243,9 +244,30 @@ best_val   = float("inf")
 bad_epochs = 0
 global_step = 0 
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-#scheduler = CosineAnnealingLR(optimizer, T_max=max_iters, eta_min=1e-6)
-scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+# define Noam LR cauculator
+def get_noam_lr(step, d_model, warmup_steps, lr_factor):
+    if step == 0:
+        step = 1 # avoid illegal json input
+    
+    # lr = factor * (d_model**-0.5 * min(step**-0.5, step * warmup**-1.5))
+    arg1 = step**-0.5
+    arg2 = step * (warmup_steps**-1.5)
+    
+    lr = lr_factor * (d_model**-0.5) * min(arg1, arg2)
+    return lr
+
+#  Adam is suggested to use specialfied betas and eps
+optimizer = torch.optim.AdamW(
+    model.parameters(), 
+    lr=1.0, 
+    weight_decay=weight_decay,
+    betas=(0.9, 0.98), 
+    eps=1e-9
+)
+
+# optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+# scheduler = CosineAnnealingLR(optimizer, T_max=max_iters, eta_min=1e-6)
+# scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
 
 @torch.no_grad()
 def evaluate(loader):
@@ -263,6 +285,11 @@ for epoch in range(1, max_epochs + 1):
     epoch_start_time = time.time()
     
     for batch_idx, (xb, yb) in enumerate(train_loader):
+        # use Noam LR
+        lr = get_noam_lr(global_step, d_model, warmup, 1.0)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
         xb, yb = xb.to(device), yb.to(device)
         
         # 1. Forward pass
@@ -276,19 +303,17 @@ for epoch in range(1, max_epochs + 1):
 
         # 3. add tensorboard log
         writer.add_scalar("loss/train_batch", loss.item(), global_step)
+        # writer.add_scalar("lr(step)", lr, global_step)
         global_step += 1
 
         if batch_idx % 100 == 0: 
              print(f"Epoch {epoch} | Batch {batch_idx}/{len(train_loader)} | Loss {loss.item():.4f}")
-
 
     # validation
     print(f"Epoch {epoch} finished in {time.time() - epoch_start_time:.2f}s. Running validation...")
 
     val_loss = evaluate(val_loader)
     print(f"Epoch {epoch:4d} | Val Loss {val_loss:.4f}")
-    
-    scheduler.step(val_loss) 
 
     # add tensorboard log
     writer.add_scalar("loss/val", val_loss, epoch) 
